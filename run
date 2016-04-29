@@ -1,0 +1,78 @@
+#!/bin/bash
+
+if [ -z "$AWS_ACCESS_KEY_ID" ]; then
+  echo "AWS_ACCESS_KEY_ID must be set"
+fi
+
+if [ -z "$AWS_SECRET_ACCESS_KEY" ]; then
+  echo "AWS_SECRET_ACCESS_KEY must be set"
+fi
+
+if [ -z "$S3_BUCKET" ]; then
+  echo "S3_BUCKET must be set"
+fi
+
+if [ -z "$S3_POSTGRES_PREFIX" ]; then
+  echo "S3_POSTGRES_PREFIX must be set"
+fi
+
+if [ -z "$POSTGRES_HOST" ]; then
+  if [ -n "${POSTGRES_PORT_5432_TCP_ADDR}" ]; then
+    POSTGRES_HOST=$POSTGRES_PORT_5432_TCP_ADDR
+    POSTGRES_PORT=$POSTGRES_PORT_5432_TCP_PORT
+  else
+    echo "You need to set the POSTGRES_HOST environment variable."
+    exit 1
+  fi
+fi
+
+if [ -z "${POSTGRES_DATABASE}" ]; then
+  echo "You need to set the POSTGRES_DATABASE environment variable."
+  exit 1
+fi
+
+if [ -z "${POSTGRES_USER}" ]; then
+  echo "You need to set the POSTGRES_USER environment variable."
+  exit 1
+fi
+
+if [ -z "${POSTGRES_PASSWORD}" ]; then
+  echo "You need to set the POSTGRES_PASSWORD environment variable or link to a container named POSTGRES."
+  exit 1
+fi
+
+export PGPASSWORD=$POSTGRES_PASSWORD
+POSTGRES_HOST_OPTS="-h $POSTGRES_HOST -p $POSTGRES_PORT -U $POSTGRES_USER"
+DUMP_FILE='postgres.dump'
+
+if [ "$1" == "backup" ]; then
+  echo "Starting backup..."
+
+  DATE=$(date +%Y%m%d_%H%M%S)
+  FILE='/backup/backup-$date.tar.gz'
+
+  echo "Creating dump of ${POSTGRES_DATABASE} database from ${POSTGRES_HOST}..."
+  rm -f $DUMP_FILE
+  pg_dump $POSTGRES_HOST_OPTS -Fc $POSTGRES_DATABASE -f $DUMP_FILE
+  tar zcf $FILE $DUMP_FILE
+  aws s3api put-object --bucket $S3_BUCKET --key $S3_POSTGRES_PREFIX/$DATE.tar.gz --body $FILE
+
+elif [ "$1" == "list" ]; then
+  echo "Starting restore from file ${2} ..."
+
+	aws s3api list-objects --bucket $S3_BUCKET --prefix $S3_POSTGRES_PREFIX --query 'Contents[].{Key: Key, Size: Size}' --output table
+
+elif [ "$1" == "restore" ]; then
+  echo "Starting restore..."
+
+  FILE=$2
+
+  rm -f $DUMP_FILE
+  aws s3api get-object --bucket $S3_BUCKET --key $S3_POSTGRES_PREFIX/$FILE /backup/$FILE
+  tar zxf /backup/$FILE -C /backup
+  # dropdb -U postgres mydb
+  pg_restore $POSTGRES_HOST_OPTS -C -Fc -d $POSTGRES_DATABASE $DUMP_FILE
+
+else
+  echo "Unknown command ${1}"
+fi
